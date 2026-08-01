@@ -1,0 +1,33 @@
+# Private source material
+data/pdfs/*
+!data/pdfs/.gitkeep
+data/texts/*
+!data/texts/.gitkeep
+
+# Generated reports
+exports/*
+!exports/.gitkeep
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+.uv-cache/
+
+# IDE
+.vscode/
+
+# Empty local placeholder from the editor workspace
+index.html
+
+# Local Codex/agent state
+.agents/
+.codex/

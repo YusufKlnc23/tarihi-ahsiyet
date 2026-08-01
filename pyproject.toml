@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tarih-pdf-analyzer"
+version = "0.1.0"
+description = "Tarih kitaplarini PDF'ten okuyup tartisma konularina gore analiz eden CLI pipeline."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gradio>=6.0.0",
+    "openai>=1.40.0",
+    "psycopg[binary]>=3.2.0",
+    "pydantic>=2.7.0",
+    "PyMuPDF>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+]
+mcp = [
+    "mcp>=1.10.0",
+]
+
+[project.scripts]
+tarih-analyze = "tarih_pdf_analyzer.cli:main"
+tarih-mcp-server = "tarih_pdf_analyzer.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
