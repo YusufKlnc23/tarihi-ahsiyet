@@ -11,7 +11,8 @@ from .db import Database
 from .exporter import write_json_report, write_markdown_report, write_topics_csv
 from .chat import FigureChatService
 from .figures import load_figure_manifest, slugify
-from .llm import MockAnalyzer, OpenAIAnalyzer
+from .judge import GeminiTopicJudge, MockTopicJudge, judge_book_topics
+from .llm import GeminiAnalyzer, MockAnalyzer
 from .manual_text import ManualTextError, load_manual_text_book, load_standalone_text_file
 from .metadata import (
     first_pages_sample,
@@ -62,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_group.add_argument("--all", action="store_true")
     analyze.add_argument("--mock", action="store_true", help="API anahtari olmadan deterministik analiz yapar.")
 
+    judge = subparsers.add_parser("judge-topics", help="Chunk'lardan tartisma konusu adaylarini yargilar.")
+    judge_group = judge.add_mutually_exclusive_group(required=True)
+    judge_group.add_argument("--book-id", type=int)
+    judge_group.add_argument("--all", action="store_true")
+    judge.add_argument("--mock", action="store_true", help="Gemini cagirmadan deterministik judge calistirir.")
+    judge.add_argument("--limit", type=int, help="Kitap basina degerlendirilecek kaynak chunk limiti.")
+
     export = subparsers.add_parser("export", help="Analiz raporlarini disari aktarir.")
     export_group = export.add_mutually_exclusive_group(required=True)
     export_group.add_argument("--book-id", type=int)
@@ -78,9 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
 def _make_analyzer(settings, mock: bool):
     if mock:
         return MockAnalyzer(), "mock"
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY yok. Analiz icin anahtar verin veya --mock kullanin.")
-    return OpenAIAnalyzer(settings.openai_api_key, settings.openai_model), settings.openai_model
+    if not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY yok. Analiz icin anahtar verin veya --mock kullanin.")
+    return GeminiAnalyzer(settings.gemini_api_key, settings.gemini_model), settings.gemini_model
+
+
+def _make_topic_judge(settings, mock: bool):
+    if mock:
+        return MockTopicJudge(), "mock"
+    if not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY yok. Judge icin anahtar verin veya --mock kullanin.")
+    return GeminiTopicJudge(settings.gemini_api_key, settings.gemini_model), settings.gemini_model
 
 
 def command_init_db(db: Database) -> None:
@@ -280,6 +296,25 @@ def command_analyze(args, db: Database, settings) -> None:
         print(f"Analiz tamamlandi book_id={book['id']} run_id={run_id}")
 
 
+def command_judge_topics(args, db: Database, settings) -> None:
+    db.init_schema()
+    client, model_name = _make_topic_judge(settings, mock=args.mock)
+    books = db.get_books_for_analysis(args.book_id, args.all)
+    if not books:
+        print("Judge calistirilacak kitap bulunamadi.")
+        return
+    for book in books:
+        print(f"Judge basladi book_id={book['id']} {book['title']}")
+        written = judge_book_topics(
+            db=db,
+            client=client,
+            book=book,
+            model_name=model_name,
+            limit=args.limit,
+        )
+        print(f"Judge tamamlandi book_id={book['id']} topic_adayi={written}")
+
+
 def command_export(args, db: Database) -> None:
     formats = {item.strip().lower() for item in args.format.split(",") if item.strip()}
     unknown = formats - {"markdown", "md", "json", "csv"}
@@ -330,9 +365,9 @@ def main(argv: list[str] | None = None) -> None:
         command_review_metadata(args, db)
     elif args.command == "analyze":
         command_analyze(args, db, settings)
+    elif args.command == "judge-topics":
+        command_judge_topics(args, db, settings)
     elif args.command == "export":
         command_export(args, db)
     else:
         parser.error(f"Unknown command: {args.command}")
-
-

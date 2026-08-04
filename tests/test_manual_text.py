@@ -102,7 +102,7 @@ def test_load_standalone_text_file_creates_document_and_chunks(tmp_path):
     path = tmp_path / "referans-notu.txt"
     path.write_text("Enver Pasa ve Ittihat tartismasi. " * 80, encoding="utf-8")
 
-    document, metadata, chunks = load_standalone_text_file(path, max_tokens=120)
+    document, metadata, chunks = load_standalone_text_file(path, max_tokens=150)
 
     assert document.metadata["source_type"] == "standalone_text"
     assert metadata.title == "referans-notu"

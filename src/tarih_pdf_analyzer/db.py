@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .models import PdfDocument, TextChunk
-from .schemas import BookMetadataGuess, BookReport, ChunkAnalysis, FigureSeed
+from .schemas import BookMetadataGuess, BookReport, ChunkAnalysis, FigureSeed, JudgedDebateTopic
 
 
 SCHEMA_SQL = """
@@ -151,6 +151,42 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     citations JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS topic_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    chunk_id BIGINT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    topic_title TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    people JSONB NOT NULL DEFAULT '[]'::jsonb,
+    events JSONB NOT NULL DEFAULT '[]'::jsonb,
+    periods JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence TEXT NOT NULL,
+    confidence NUMERIC(5,4) NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_topic_candidates_chunk ON topic_candidates(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_topic_candidates_title ON topic_candidates(topic_title);
+
+CREATE TABLE IF NOT EXISTS topic_judgements (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id BIGINT NOT NULL REFERENCES topic_candidates(id) ON DELETE CASCADE,
+    approved BOOLEAN NOT NULL DEFAULT false,
+    relevance_score NUMERIC(6,3) NOT NULL DEFAULT 0,
+    evidence_score NUMERIC(6,3) NOT NULL DEFAULT 0,
+    hallucination_risk NUMERIC(6,3) NOT NULL DEFAULT 0,
+    debate_value NUMERIC(6,3) NOT NULL DEFAULT 0,
+    action TEXT NOT NULL DEFAULT 'review',
+    reason TEXT NOT NULL DEFAULT '',
+    judge_model TEXT NOT NULL,
+    raw_response JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_topic_judgements_candidate ON topic_judgements(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_topic_judgements_approved ON topic_judgements(approved);
+CREATE INDEX IF NOT EXISTS idx_topic_judgements_scores
+    ON topic_judgements(relevance_score DESC, evidence_score DESC, debate_value DESC);
 """
 
 LEGACY_MIGRATION_SQL = """
@@ -481,7 +517,7 @@ class Database:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, chunk_index, start_page, end_page, text, token_count
+                SELECT id, chunk_index, start_page, end_page, text, token_count, chunk_type
                 FROM chunks
                 WHERE book_id = %s
                 ORDER BY chunk_index
@@ -496,6 +532,7 @@ class Database:
                 "end_page": row[3],
                 "text": row[4],
                 "token_count": row[5],
+                "chunk_type": row[6],
             }
             for row in rows
         ]
@@ -602,6 +639,98 @@ class Database:
                     _json(payload),
                 ),
             )
+
+    def replace_topic_judgements_for_chunk(
+        self,
+        chunk_id: int,
+        topics: list[JudgedDebateTopic],
+        judge_model: str,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM topic_candidates WHERE chunk_id = %s", (chunk_id,))
+            for topic in topics:
+                candidate = topic.candidate
+                judgement = topic.judgement
+                raw_response = topic.model_dump()
+                row = connection.execute(
+                    """
+                    INSERT INTO topic_candidates (
+                        chunk_id, topic_title, claim, people, events, periods,
+                        evidence, confidence
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        chunk_id,
+                        candidate.topic_title,
+                        candidate.claim,
+                        _json(candidate.people),
+                        _json(candidate.events),
+                        _json(candidate.periods),
+                        candidate.evidence,
+                        candidate.confidence,
+                    ),
+                ).fetchone()
+                candidate_id = int(row[0])
+                connection.execute(
+                    """
+                    INSERT INTO topic_judgements (
+                        candidate_id, approved, relevance_score, evidence_score,
+                        hallucination_risk, debate_value, action, reason,
+                        judge_model, raw_response
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        candidate_id,
+                        judgement.approved,
+                        judgement.relevance_score,
+                        judgement.evidence_score,
+                        judgement.hallucination_risk,
+                        judgement.debate_value,
+                        judgement.action,
+                        judgement.reason,
+                        judge_model,
+                        _json(raw_response),
+                    ),
+                )
+
+    def get_approved_topic_context(self, chunk_ids: list[int], limit: int = 12) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        placeholders = ", ".join(["%s"] * len(chunk_ids))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    tc.chunk_id, tc.topic_title, tc.claim, tc.evidence,
+                    tj.relevance_score, tj.evidence_score, tj.debate_value
+                FROM topic_candidates tc
+                JOIN topic_judgements tj ON tj.candidate_id = tc.id
+                WHERE tc.chunk_id IN ({placeholders})
+                  AND tj.approved = true
+                  AND tj.action IN ('keep', 'revise')
+                ORDER BY
+                    tj.relevance_score DESC,
+                    tj.evidence_score DESC,
+                    tj.debate_value DESC
+                LIMIT %s
+                """,
+                (*chunk_ids, limit),
+            ).fetchall()
+        return [
+            {
+                "chunk_id": row[0],
+                "topic_title": row[1],
+                "claim": row[2],
+                "evidence": row[3],
+                "relevance_score": float(row[4]),
+                "evidence_score": float(row[5]),
+                "debate_value": float(row[6]),
+            }
+            for row in rows
+        ]
 
     def get_latest_reports(self, book_id: int | None = None) -> list[dict[str, Any]]:
         where = ""
@@ -746,7 +875,7 @@ class Database:
     def search_chunks(
         self,
         patterns: list[str],
-        limit: int = 40,
+        limit: int = 50,
     ) -> list[dict[str, Any]]:
         cleaned_patterns = [pattern.strip() for pattern in patterns if pattern.strip()]
         if not cleaned_patterns:

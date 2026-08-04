@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import re
+
 from .config import Settings
 from .db import Database
 from .retrieval import FigureRetriever, alias_hits
 from .schemas import ChatAnswer, Citation, RetrievedChunk
-from .text_cleaning import normalize_for_prompt
+from .text_cleaning import normalize_for_prompt, repair_mojibake
+
+
+_SOURCE_LINE_RE = re.compile(
+    r"^\s*(?:kaynaklar|kaynak|kitap|yazar|sayfa|chunk|parca\s+\d+)\b.*$",
+    re.IGNORECASE,
+)
+_META_PREFIX_RE = re.compile(
+    r"^\s*(?:verilen\s+)?(?:kaynaklara|kaynaklarda|metinlere|metinlerde|chunklarda)\s+gore[:,]?\s*",
+    re.IGNORECASE,
+)
 
 
 def citation_from_chunk(chunk: RetrievedChunk) -> Citation:
@@ -25,11 +37,8 @@ def citation_from_chunk(chunk: RetrievedChunk) -> Citation:
 def format_sources(chunks: list[RetrievedChunk], max_chars: int = 9000) -> str:
     blocks: list[str] = []
     used = 0
-    for chunk in chunks:
-        header = (
-            f"[chunk_id={chunk.chunk_id}; kitap={chunk.book_title}; "
-            f"yazar={chunk.author}; sayfa={chunk.start_page}-{chunk.end_page}; tip={chunk.chunk_type}]"
-        )
+    for index, chunk in enumerate(chunks, start=1):
+        header = f"[parca {index}]"
         body = normalize_for_prompt(chunk.text, max_chars=1800)
         block = f"{header}\n{body}"
         if used + len(block) > max_chars:
@@ -39,25 +48,48 @@ def format_sources(chunks: list[RetrievedChunk], max_chars: int = 9000) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+def format_judged_topics(topics: list[dict], max_items: int = 8) -> str:
+    if not topics:
+        return ""
+    lines = []
+    for index, topic in enumerate(topics[:max_items], start=1):
+        lines.append(
+            (
+                f"{index}. {topic.get('topic_title', '')}\n"
+                f"Iddia: {topic.get('claim', '')}\n"
+                f"Kanit: {topic.get('evidence', '')}"
+            )
+        )
+    return "\n\n".join(lines)
+
+
 def build_local_source_answer(
     scope_name: str,
     chunks: list[RetrievedChunk],
     api_unavailable: bool = False,
 ) -> str:
-    lines = [f"{scope_name} icin kaynaklarda su bilgiler one cikiyor:"]
+    lines = [f"{scope_name} hakkinda veri tabanindaki metinlerden cikan ozet:"]
     for index, chunk in enumerate(chunks[:3], start=1):
-        preview = normalize_for_prompt(chunk.text, max_chars=650)
-        lines.append(
-            f"\n{index}. {chunk.book_title}, sayfa {chunk.start_page}-{chunk.end_page}:\n"
-            f"{preview}"
-        )
-    lines.append(f"\nToplam {len(chunks)} kaynak chunk bulundu.")
+        preview = normalize_for_prompt(chunk.text, max_chars=850)
+        lines.append(f"\n{index}. {preview}")
     if api_unavailable:
         lines.append(
-            "\nNot: OpenAI API su an kullanilamadigi icin cevap dogrudan "
-            "kaynak chunk'lardan yerel olarak hazirlandi."
+            "\nNot: Gemini API su an kullanilamadigi icin cevap, bulunan metin "
+            "parcalarindan yerel olarak hazirlandi."
         )
     return "\n".join(lines)
+
+
+def clean_generated_answer(answer: str) -> str:
+    answer = repair_mojibake(answer).strip()
+    answer = _META_PREFIX_RE.sub("", answer)
+    lines = [
+        line.rstrip()
+        for line in answer.splitlines()
+        if not _SOURCE_LINE_RE.match(line)
+    ]
+    return "\n".join(lines).strip()
+
 
 
 class FigureChatService:
@@ -115,53 +147,58 @@ class FigureChatService:
             )
 
         citations = [citation_from_chunk(chunk) for chunk in chunks]
-        if not use_llm or not self.settings.openai_api_key:
+        judged_topics = []
+        if hasattr(self.db, "get_approved_topic_context"):
+            try:
+                judged_topics = self.db.get_approved_topic_context(
+                    [chunk.chunk_id for chunk in chunks]
+                )
+            except Exception:
+                judged_topics = []
+        api_key = self.settings.gemini_api_key
+        if not use_llm or not api_key:
             return ChatAnswer(
                 answer=build_local_source_answer(scope_name, chunks),
                 citations=citations,
             )
 
-        try:
-            from .openai_client import load_openai_client, create_chat_completion
-        except ImportError:
-            return ChatAnswer(
-                answer="OpenAI baglayici modul bulunamadi. `pip install openai` veya proje baglantilarini kontrol edin.",
-                citations=citations,
-            )
-
-        client = load_openai_client(self.settings.openai_api_key)
         system = (
             "Turk tarihi kaynaklari uzerinden cevap veren bir arastirma asistanisin. "
             "Sadece verilen kaynak chunk'lara dayan. Kaynaklarda yoksa bunu acikca soyle. "
             "Secili sahsiyet kaynaklarda acikca gecmiyorsa tahmin yurutme. "
             "Kisi adlari benzerse veya kanit zayifsa belirsiz oldugunu soyle. "
-            "Cevabin sonunda kaynak numarasi uydurma; kaynak listesi uygulama tarafindan eklenecek."
+            "Cevapta kitap adi, yazar adi, sayfa numarasi, chunk id veya kaynak listesi yazma. "
+            "`Verilen kaynaklara gore`, `metinlerde`, `kaynaklarda` gibi meta girisler kullanma. "
+            "Onayli tartisma konulari varsa cevabi bu konularla hizala. "
+            "Soru belirli bir konuya odaklaniyorsa genel biyografi yazma; dogrudan o konuyu cevapla. "
+            "Once sorunun net cevabini ver, sonra gerekli baglami ve gerekceyi ekle. "
+            "Turkce karakterleri dogal ve dogru kullan. "
+            "Kullaniciya dogrudan, akici ve anlamli cevabi ver. "
+            "Kisa gecme; 4-6 paragraf yaz, gerekiyorsa maddeli aciklama kullan."
         )
         user = (
             f"Kapsam: {scope_name}\n"
             f"Donem: {scope_period}\n"
             f"Soru: {question}\n\n"
-            f"Kaynak chunk'lar:\n{format_sources(chunks)}"
+            f"Onayli tartisma konulari:\n{format_judged_topics(judged_topics) or '-'}\n\n"
+            f"Arka plan parcalari:\n{format_sources(chunks)}"
         )
+
         try:
-            response = create_chat_completion(
-                client,
-                model=self.settings.openai_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=0.2,
+            from .gemini_client import generate_text
+
+            answer = generate_text(
+                api_key=api_key,
+                model=self.settings.gemini_model,
+                system=system,
+                user=user,
+                temperature=0.15,
+                max_output_tokens=3200,
             )
-            content = getattr(response.choices[0], "message", None)
-            if isinstance(content, dict):
-                answer = content.get("content") or "Cevap uretilemedi."
-            else:
-                answer = getattr(content, "content", None) or "Cevap uretilemedi."
-        except Exception as exc:
+        except Exception:
             answer = build_local_source_answer(
                 scope_name,
                 chunks,
                 api_unavailable=True,
             )
-        return ChatAnswer(answer=answer, citations=citations)
+        return ChatAnswer(answer=clean_generated_answer(answer), citations=citations)

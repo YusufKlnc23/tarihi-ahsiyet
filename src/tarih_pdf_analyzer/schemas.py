@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 try:
     from pydantic import BaseModel, Field  # type: ignore[import]
 except ImportError:
@@ -96,3 +98,35 @@ class BookReport(BaseModel):
     debate_map: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
     topics: list[BookTopic] = Field(default_factory=list)
+
+
+JudgeAction = Literal["keep", "merge", "revise", "reject", "review"]
+
+
+class DebateTopicCandidate(BaseModel):
+    topic_title: str = Field(min_length=1)
+    claim: str = Field(min_length=1)
+    people: list[str] = Field(default_factory=list)
+    events: list[str] = Field(default_factory=list)
+    periods: list[str] = Field(default_factory=list)
+    evidence: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class DebateTopicJudgement(BaseModel):
+    approved: bool = False
+    relevance_score: float = Field(ge=0.0, le=100.0)
+    evidence_score: float = Field(ge=0.0, le=100.0)
+    hallucination_risk: float = Field(ge=0.0, le=100.0)
+    debate_value: float = Field(ge=0.0, le=100.0)
+    action: JudgeAction = "review"
+    reason: str = ""
+
+
+class JudgedDebateTopic(BaseModel):
+    candidate: DebateTopicCandidate
+    judgement: DebateTopicJudgement
+
+
+class DebateJudgeResponse(BaseModel):
+    topics: list[JudgedDebateTopic] = Field(default_factory=list)

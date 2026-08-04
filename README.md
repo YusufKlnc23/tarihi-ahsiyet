@@ -20,8 +20,9 @@ tarih-analyze init-db
 LLM cevabi icin:
 
 ```powershell
-$env:OPENAI_API_KEY="..."
-$env:OPENAI_MODEL="gpt-4o-mini"
+$env:GEMINI_API_KEY="..."
+$env:GEMINI_MODEL="gemini-3.5-flash"
+$env:LLM_PROVIDER="gemini"
 ```
 
 ## Veri Akisi

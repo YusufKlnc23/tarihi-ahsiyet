@@ -1,11 +1,12 @@
 import json
 
-from tarih_pdf_analyzer.chat import citation_from_chunk, format_sources
+from tarih_pdf_analyzer.chat import clean_generated_answer, citation_from_chunk, format_sources
 from tarih_pdf_analyzer.chat import FigureChatService
 from tarih_pdf_analyzer.config import Settings
 from tarih_pdf_analyzer.figures import load_figure_manifest, slugify
-from tarih_pdf_analyzer.retrieval import question_terms, score_text
+from tarih_pdf_analyzer.retrieval import focused_question_terms, question_terms, score_text
 from tarih_pdf_analyzer.schemas import RetrievedChunk
+from tarih_pdf_analyzer.text_cleaning import repair_mojibake
 
 
 def test_slugify_normalizes_turkish_names():
@@ -72,6 +73,15 @@ def test_score_text_requires_alias_when_requested():
     assert score == 0.0
 
 
+def test_focused_question_terms_removes_figure_name():
+    terms = focused_question_terms(
+        "Enver Paşa Babıali Baskını'nda ne yapti?",
+        aliases=["Enver Pasa", "Enver Paşa"],
+    )
+
+    assert terms == ["babiali", "baskini", "yapti"]
+
+
 def test_chat_service_answers_from_all_sources_without_figure():
     chunk = RetrievedChunk(
         chunk_id=10,
@@ -93,8 +103,9 @@ def test_chat_service_answers_from_all_sources_without_figure():
         db=None,
         settings=Settings(
             database_url="postgresql://localhost",
-            openai_api_key=None,
-            openai_model="test-model",
+            llm_provider="gemini",
+            gemini_api_key=None,
+            gemini_model="test-model",
             metadata_confidence_threshold=0.75,
             chunk_max_tokens=1800,
             chunk_overlap_tokens=160,
@@ -126,5 +137,15 @@ def test_citation_and_source_formatting():
     sources = format_sources([chunk])
 
     assert citation.pages == "12-15"
-    assert "chunk_id=10" in sources
-    assert "Ornek Kitap" in sources
+    assert "[parca 1]" in sources
+    assert "chunk_id=10" not in sources
+    assert "Ornek Kitap" not in sources
+
+
+def test_text_cleanup_repairs_mojibake_and_strips_source_lines():
+    assert repair_mojibake("ReÅŸad PaÅŸa") == "Reşad Paşa"
+    answer = clean_generated_answer(
+        "Verilen kaynaklara gore, Enver Paşa onemliydi.\nSayfa 89: ayrinti"
+    )
+
+    assert answer == "Enver Paşa onemliydi."

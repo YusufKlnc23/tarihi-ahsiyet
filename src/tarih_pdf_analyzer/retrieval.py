@@ -5,6 +5,7 @@ import unicodedata
 
 from .db import Database
 from .schemas import RetrievedChunk
+from .text_cleaning import repair_mojibake
 
 
 _WORD_RE = re.compile(r"\w{3,}", re.UNICODE)
@@ -33,17 +34,25 @@ _QUESTION_STOP_TERMS = {
     "bilgi",
     "cevap",
     "degerlendiriliyor",
+    "detay",
+    "detayli",
     "hakkinda",
     "hangi",
     "kaynak",
     "kaynaklarda",
     "kimdir",
+    "kisaca",
+    "nda",
+    "nde",
+    "metinlerde",
     "nedir",
     "nasil",
     "neydi",
+    "neden",
     "olarak",
     "rolu",
     "sence",
+    "soyle",
     "ver",
 }
 _ALIAS_TOKEN_STOP_TERMS = {"bey", "han", "pasa", "paşa", "sultan"}
@@ -56,15 +65,20 @@ _SEARCH_CHAR_VARIANTS = {
     "u": ("ü",),
 }
 _FIGURE_SOURCE_PRIORITIES = {
+    "enver-pasa": (
+        ("turkiyenin yakin tarihi", 89, 500),
+        ("turkiye'nin yakin tarihi", 89, 500),
+    ),
     "mehmed-resad": (
-        ("ittihatterrakikiskacindabirsultan", 200),
-        ("ittihat terraki kiskacinda bir sult", 80),
-        ("ittihat terakki kiskacinda bir sultan", 80),
+        ("ittihatterrakikiskacindabirsultan", None, 200),
+        ("ittihat terraki kiskacinda bir sult", None, 80),
+        ("ittihat terakki kiskacinda bir sultan", None, 80),
     )
 }
 
 
 def normalize_match(value: str) -> str:
+    value = repair_mojibake(value)
     value = value.translate(_TR_MAP)
     normalized = unicodedata.normalize("NFKD", value)
     ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
@@ -165,6 +179,29 @@ def normalized_aliases(aliases: list[str]) -> list[str]:
     return sorted(set(cleaned), key=len, reverse=True)
 
 
+def alias_token_terms(aliases: list[str]) -> set[str]:
+    tokens: set[str] = set()
+    for alias in aliases:
+        normalized_alias = normalize_match(alias)
+        for match in _WORD_RE.finditer(normalized_alias):
+            token = match.group(0)
+            if token not in _ALIAS_TOKEN_STOP_TERMS:
+                tokens.add(token)
+    return tokens
+
+
+def focused_question_terms(question: str, aliases: list[str], max_terms: int = 8) -> list[str]:
+    alias_tokens = alias_token_terms(aliases)
+    focused: list[str] = []
+    for term in question_terms(question, max_terms=max_terms + len(alias_tokens) + 4):
+        if term in alias_tokens or term in _ALIAS_TOKEN_STOP_TERMS:
+            continue
+        focused.append(term)
+        if len(focused) >= max_terms:
+            break
+    return focused
+
+
 def alias_hits(text: str, aliases: list[str]) -> int:
     normalized_text = normalize_match(text)
     hits = 0
@@ -205,8 +242,10 @@ def score_text(
 
 def source_priority_score(figure_slug: str, row: dict) -> float:
     normalized_title = normalize_match(str(row.get("book_title") or ""))
-    for pattern, boost in _FIGURE_SOURCE_PRIORITIES.get(figure_slug, ()):
-        if pattern in normalized_title:
+    start_page = int(row.get("start_page") or 0)
+    end_page = int(row.get("end_page") or 0)
+    for pattern, page, boost in _FIGURE_SOURCE_PRIORITIES.get(figure_slug, ()):
+        if pattern in normalized_title and (page is None or start_page <= page <= end_page):
             return float(boost)
     return 0.0
 
@@ -226,11 +265,22 @@ class FigureRetriever:
             return []
 
         aliases = [figure["name"], *(figure.get("aliases") or [])]
-        terms = question_terms(question)
-        rows = self.db.search_chunks(search_patterns(aliases, terms), limit=300)
+        terms = focused_question_terms(question, aliases)
+        rows = self.db.search_chunks(search_patterns(aliases, terms), limit=800)
 
         scored: list[RetrievedChunk] = []
         for row in rows:
+            alias_score = alias_hits(row["text"], aliases)
+            if alias_score <= 0:
+                continue
+            question_score = term_hits(row["text"], terms)
+            priority_score = (
+                source_priority_score(str(figure.get("slug") or ""), row)
+                if not terms or question_score > 0
+                else 0.0
+            )
+            if terms and question_score <= 0 and priority_score <= 0:
+                continue
             score = score_text(
                 row["text"],
                 aliases=aliases,
@@ -238,10 +288,25 @@ class FigureRetriever:
                 chunk_type=row.get("chunk_type", "source"),
                 require_alias=True,
             )
-            score += source_priority_score(str(figure.get("slug") or ""), row)
+            score += question_score * 12 + priority_score
             if score <= 0:
                 continue
             scored.append(RetrievedChunk.model_validate({**row, "score": score}))
+
+        if not scored and terms:
+            rows = self.db.search_chunks(search_patterns(aliases, []), limit=300)
+            for row in rows:
+                score = score_text(
+                    row["text"],
+                    aliases=aliases,
+                    terms=[],
+                    chunk_type=row.get("chunk_type", "source"),
+                    require_alias=True,
+                )
+                score += source_priority_score(str(figure.get("slug") or ""), row)
+                if score <= 0:
+                    continue
+                scored.append(RetrievedChunk.model_validate({**row, "score": score}))
 
         return sorted(scored, key=lambda chunk: chunk.score, reverse=True)[:limit]
 
@@ -264,7 +329,6 @@ class FigureRetriever:
         return sorted(scored, key=lambda chunk: chunk.score, reverse=True)[:limit]
 
 
-def  retrieve_chunks_for_figure(db: Database, figure_id: int, question: str, limit: int = 5) -> list[RetrievedChunk]:
+def retrieve_chunks_for_figure(db: Database, figure_id: int, question: str, limit: int = 5) -> list[RetrievedChunk]:
     retriever = FigureRetriever(db)
     return retriever.retrieve(figure_id, question, limit=limit)
-    

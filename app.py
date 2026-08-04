@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import re
 import unicodedata
@@ -25,31 +26,81 @@ from tarih_pdf_analyzer.db import Database
 
 APP_CSS = """
 :root {
-    --panel-border: #d7dde8;
-    --panel-bg: #f7f9fc;
-    --ink: #1f2937;
+    --border: #d9e0e8;
+    --ink: #172033;
+    --muted: #667085;
+    --surface: #ffffff;
+    --surface-soft: #f6f8fb;
+    --accent: #245f73;
 }
-.top-panel {
-    border: 1px solid var(--panel-border);
+.gradio-container {
+    max-width: 100vw !important;
+    min-height: 100vh !important;
+    padding: 12px !important;
+    background: var(--surface-soft);
+}
+.app-shell {
+    min-height: calc(100vh - 24px);
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 10px;
+}
+.app-header {
+    border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 18px 20px;
-    background: var(--panel-bg);
+    padding: 14px 16px;
+    background: var(--surface);
 }
-.top-panel h1 {
-    margin-bottom: 10px;
+.app-header h1 {
+    margin: 0;
+    font-size: 24px;
+    line-height: 1.2;
+    color: var(--ink);
+}
+.app-header p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 14px;
+}
+.chat-grid {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+}
+.admin-panel {
+    max-width: 320px;
+}
+.chat-column {
+    min-height: 0;
+}
+.chatbot-main {
+    height: calc(100vh - 238px) !important;
+    min-height: 430px !important;
+}
+.input-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--surface);
 }
 .status-box textarea {
     font-size: 13px !important;
 }
-.source-box {
-    border-left: 4px solid #476582;
-    padding-left: 12px;
+.example-row button {
+    min-height: 38px;
 }
-.command-box {
-    border: 1px solid var(--panel-border);
-    border-radius: 8px;
-    padding: 12px;
-    background: #ffffff;
+@media (max-width: 760px) {
+    .gradio-container {
+        padding: 8px !important;
+    }
+    .app-header h1 {
+        font-size: 20px;
+    }
+    .chatbot-main {
+        height: calc(100vh - 270px) !important;
+        min-height: 360px !important;
+    }
 }
 """
 
@@ -58,6 +109,8 @@ settings = load_settings()
 db = Database(settings.database_url)
 
 SOURCE_DIR = Path("data/pdfs")
+SHOW_ADMIN_PANEL = os.getenv("SHOW_ADMIN_PANEL", "").strip().lower() in {"1", "true", "yes", "on"}
+PUBLIC_DEMO = not SHOW_ADMIN_PANEL
 _TR_MAP = str.maketrans(
     {
         "ç": "c",
@@ -119,6 +172,17 @@ def refresh_source_choices():
     return gr.update(choices=choices, value=choices[0] if choices else None)
 
 
+def demo_mode_note() -> str:
+    if PUBLIC_DEMO:
+        return (
+            "Demo modu aktif. Kaynak yukleme ve dosya inceleme kontrolleri gizli; "
+            "sohbet mevcut PostgreSQL chunk'lari ve Gemini uzerinden calisir."
+        )
+    return (
+        "Yerel yonetim modu aktif. Kaynak yukleme ve dosya inceleme kontrolleri kullanilabilir."
+    )
+
+
 def parse_figure_id(value: str | None) -> int | None:
     if not value or value == "0" or value.startswith("0:"):
         return None
@@ -128,20 +192,6 @@ def parse_figure_id(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
-
-
-def source_markdown(answer) -> str:
-    if not answer.citations:
-        return "### Kaynaklar\nKaynak eslesmesi bulunamadi."
-    lines = ["### Kaynaklar"]
-    for citation in answer.citations:
-        lines.append(
-            (
-                f"- **{citation.book_title}** / {citation.author}, "
-                f"chunk {citation.chunk_index}, sayfa {citation.pages}"
-            )
-        )
-    return "\n".join(lines)
 
 
 def source_status() -> str:
@@ -306,131 +356,138 @@ def append_exchange(history: list | None, message: str, response: str) -> list[d
 
 def chat_turn(message: str, history: list | None, figure: str | None):
     if not message.strip():
-        return history or [], "### Kaynaklar\nSoru girilmedi.", ""
+        return history or [], ""
     try:
         service = FigureChatService(db, settings)
         answer = service.answer(message, figure_id=parse_figure_id(figure))
-        return append_exchange(history, message, answer.answer), source_markdown(answer), ""
+        return append_exchange(history, message, answer.answer), ""
     except Exception as exc:
         response = (
             "Uygulama cevap uretirken hata aldi. Database baglantisini, "
-            "chunk yuklemesini ve OPENAI_API_KEY ayarini kontrol edin.\n\n"
+            "chunk yuklemesini ve GEMINI_API_KEY ayarini kontrol edin.\n\n"
             f"Hata: {exc}"
         )
-        return (
-            append_exchange(history, message, response),
-            "### Kaynaklar\nHata nedeniyle kaynak listesi uretilemedi.",
-            "",
-        )
+        return append_exchange(history, message, response), ""
+
+
+def set_question(prompt: str) -> str:
+    return prompt
+
+
+def launch_kwargs() -> dict:
+    kwargs = {
+        "server_name": os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+        "server_port": int(os.getenv("PORT") or os.getenv("GRADIO_SERVER_PORT") or "7860"),
+        "css": APP_CSS,
+        "prevent_thread_lock": True,
+        "share": os.getenv("GRADIO_SHARE", "").strip().lower() in {"1", "true", "yes", "on"},
+    }
+    username = os.getenv("DEMO_USERNAME")
+    password = os.getenv("DEMO_PASSWORD")
+    if username and password:
+        kwargs["auth"] = (username, password)
+    return kwargs
 
 with gr.Blocks(title="Tarihi Sahsiyet Chat") as demo:
-    with gr.Column(elem_classes=["top-panel"]):
+    with gr.Column(elem_classes=["app-shell"]):
         gr.Markdown(
             """
-# Tarihi Sahsiyet Chat
-
-PDF ve TXT kaynaklardan uretilen chunk'lara dayanarak cevap verir. Sahsiyet secmeden sorarsan tum kaynaklarda arama yapar.
+<div class="app-header">
+  <h1>Tarihi Sahsiyet Chat</h1>
+  <p>Turk tarihi sahsiyetleri uzerine kaynaklara dayali sohbet.</p>
+</div>
 """
         )
 
-    with gr.Row():
-        with gr.Column(scale=1, min_width=280):
-            status = gr.Textbox(
-                value="Kaynak durumunu gormek icin 'Kaynaklari yenile' butonuna basin.",
-                label="Kaynak durumu",
-                lines=5,
-                interactive=False,
-                elem_classes=["status-box"],
-            )
-            figure_dropdown = gr.Dropdown(
-                choices=[("0: Tum kaynaklar", "0")],
-                value="0",
-                label="Soru kapsami",
-                interactive=True,
-            )
-            refresh_button = gr.Button("Kaynaklari yenile")
-            refresh_button.click(fn=source_status, outputs=status)
-            refresh_button.click(fn=refresh_figure_choices, outputs=figure_dropdown)
-            ingest_button = gr.Button("PDF/TXT chunk olustur", variant="secondary")
-            ingest_button.click(fn=ingest_sources, outputs=status)
-            ingest_button.click(fn=refresh_figure_choices, outputs=figure_dropdown)
+        with gr.Row(elem_classes=["chat-grid"]):
+            if SHOW_ADMIN_PANEL:
+                with gr.Column(scale=1, min_width=260, elem_classes=["admin-panel"]):
+                    status = gr.Textbox(
+                        value="Kaynak durumunu gormek icin 'Kaynaklari yenile' butonuna basin.",
+                        label="Kaynak durumu",
+                        lines=5,
+                        interactive=False,
+                        elem_classes=["status-box"],
+                    )
+                    refresh_button = gr.Button("Kaynaklari yenile")
+                    ingest_button = gr.Button("PDF/TXT chunk olustur", variant="secondary")
 
-            source_dropdown = gr.Dropdown(
-                choices=source_choices(),
-                value=source_choices()[0] if source_choices() else None,
-                label="Kaynak incele",
-                interactive=True,
-            )
-            inspect_button = gr.Button("Sahsiyetleri tara", variant="secondary")
-            source_report = gr.Markdown("### Kaynak inceleme\nKaynak secip tarama baslat.")
-            refresh_button.click(fn=refresh_source_choices, outputs=source_dropdown)
-            ingest_button.click(fn=refresh_source_choices, outputs=source_dropdown)
-            inspect_button.click(
-                fn=inspect_selected_source,
-                inputs=source_dropdown,
-                outputs=source_report,
-            )
+                    source_dropdown = gr.Dropdown(
+                        choices=source_choices(),
+                        value=source_choices()[0] if source_choices() else None,
+                        label="Kaynak incele",
+                        interactive=True,
+                    )
+                    inspect_button = gr.Button("Sahsiyetleri tara", variant="secondary")
+                    source_report = gr.Markdown("### Kaynak inceleme\nKaynak secip tarama baslat.")
 
-            gr.Markdown(
+            with gr.Column(scale=4, elem_classes=["chat-column"]):
+                figure_dropdown = gr.Dropdown(
+                    choices=[("Tum kaynaklar", "0")],
+                    value="0",
+                    label="Soru kapsami",
+                    interactive=True,
+                )
+                chatbot = gr.Chatbot(label="Sohbet", height=620, elem_classes=["chatbot-main"])
+                with gr.Column(elem_classes=["input-panel"]):
+                    question = gr.Textbox(
+                        label="Soru",
+                        placeholder="Ornek: Enver Pasa Babiali Baskini'nda ne yapti?",
+                        lines=2,
+                    )
+                    with gr.Row(elem_classes=["example-row"]):
+                        example_one = gr.Button("Babiali Baskini")
+                        example_two = gr.Button("II. Mesrutiyet")
+                        example_three = gr.Button("Mehmed Resad")
+                    with gr.Row():
+                        send = gr.Button("Sor", variant="primary")
+                        clear = gr.Button("Temizle")
 
-                """
-<div class="command-box">
+                example_one.click(
+                    fn=lambda: set_question("Enver Pasa Babiali Baskini'nda ne yapti?"),
+                    outputs=question,
+                )
+                example_two.click(
+                    fn=lambda: set_question("II. Mesrutiyet surecinde one cikan sahsiyetler kimlerdi?"),
+                    outputs=question,
+                )
+                example_three.click(
+                    fn=lambda: set_question("Mehmed Resad Ittihat ve Terakki doneminde nasil bir roldeydi?"),
+                    outputs=question,
+                )
+                send.click(
+                    fn=chat_turn,
+                    inputs=[question, chatbot, figure_dropdown],
+                    outputs=[chatbot, question],
+                )
+                question.submit(
+                    fn=chat_turn,
+                    inputs=[question, chatbot, figure_dropdown],
+                    outputs=[chatbot, question],
+                )
+                clear.click(
+                    fn=lambda: ([], ""),
+                    outputs=[chatbot, question],
+                )
 
-**Veri hazirlama**
-
-```powershell
-uv --cache-dir .uv-cache run python -m tarih_pdf_analyzer init-db
-uv --cache-dir .uv-cache run python -m tarih_pdf_analyzer load-figures data/figures.example.json
-uv --cache-dir .uv-cache run python -m tarih_pdf_analyzer ingest data/pdfs --force
-```
-
-</div>
-"""
-            )
-
-        with gr.Column(scale=3):
-            chatbot = gr.Chatbot(label="Sohbet", height=520)
-            question = gr.Textbox(
-                label="Soru",
-                placeholder="Ornek: Enver Pasa bu kaynaklarda nasil degerlendiriliyor?",
-                lines=3,
-            )
-            with gr.Row():
-                send = gr.Button("Sor", variant="primary")
-                clear = gr.Button("Temizle")
-            sources = gr.Markdown(
-                "### Kaynaklar\nHenuz soru sorulmadi.",
-                elem_classes=["source-box"],
-            )
-
-            send.click(
-                fn=chat_turn,
-                inputs=[question, chatbot, figure_dropdown],
-                outputs=[chatbot, sources, question],
-            )
-            question.submit(
-                fn=chat_turn,
-                inputs=[question, chatbot, figure_dropdown],
-                outputs=[chatbot, sources, question],
-            )
-            clear.click(
-                fn=lambda: ([], "### Kaynaklar\nHenuz soru sorulmadi.", ""),
-                outputs=[chatbot, sources, question],
-            )
-
-    demo.load(fn=source_status, outputs=status)
+    if SHOW_ADMIN_PANEL:
+        refresh_button.click(fn=source_status, outputs=status)
+        refresh_button.click(fn=refresh_figure_choices, outputs=figure_dropdown)
+        ingest_button.click(fn=ingest_sources, outputs=status)
+        ingest_button.click(fn=refresh_figure_choices, outputs=figure_dropdown)
+        refresh_button.click(fn=refresh_source_choices, outputs=source_dropdown)
+        ingest_button.click(fn=refresh_source_choices, outputs=source_dropdown)
+        inspect_button.click(
+            fn=inspect_selected_source,
+            inputs=source_dropdown,
+            outputs=source_report,
+        )
+        demo.load(fn=source_status, outputs=status)
     demo.load(fn=refresh_figure_choices, outputs=figure_dropdown)
-     
-     
 
 
 if __name__ == "__main__":
-    demo.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
-        css=APP_CSS,
-        prevent_thread_lock=True,
-    )
+    demo.queue(max_size=16).launch(**launch_kwargs())
     try:
         while True:
             time.sleep(3600)

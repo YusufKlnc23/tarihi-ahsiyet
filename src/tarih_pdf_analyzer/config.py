@@ -8,8 +8,9 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Settings:
     database_url: str
-    openai_api_key: str | None
-    openai_model: str
+    llm_provider: str
+    gemini_api_key: str | None
+    gemini_model: str
     metadata_confidence_threshold: float
     chunk_max_tokens: int
     chunk_overlap_tokens: int
@@ -17,13 +18,18 @@ class Settings:
 
 def load_settings() -> Settings:
     load_env_file()
+    gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None
+    provider_raw = (os.getenv("LLM_PROVIDER") or "gemini").strip().lower()
+    llm_provider = "gemini" if provider_raw != "mock" else "mock"
+
     return Settings(
         database_url=os.getenv(
             "DATABASE_URL",
             "postgresql://postgres:postgres@127.0.0.1:5432/tarih_figures",
         ),
-        openai_api_key=os.getenv("OPENAI_API_KEY") or None,
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.6-terra"),
+        llm_provider=llm_provider,
+        gemini_api_key=gemini_api_key,
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
         metadata_confidence_threshold=float(
             os.getenv("METADATA_CONFIDENCE_THRESHOLD", "0.75")
         ),

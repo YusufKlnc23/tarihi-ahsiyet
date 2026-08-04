@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Protocol
+from typing import Any, Protocol
 
-from .openai_client import load_openai_client, parse_chat_content
+from .gemini_client import generate_text
 from .schemas import BookMetadataGuess, BookReport, ChunkAnalysis
 from .text_cleaning import normalize_for_prompt
 
@@ -19,24 +19,30 @@ class AnalyzerClient(Protocol):
         ...
 
 
-class OpenAIAnalyzer:
+class GeminiAnalyzer:
     def __init__(self, api_key: str, model: str) -> None:
-        self.client = load_openai_client(api_key)
+        self.api_key = api_key
         self.model = model
-
     def _json_completion(self, system: str, user: str) -> dict:
-        response = self.client.chat.completions.create(
+        content = generate_text(
+            api_key=self.api_key,
             model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            system=system,
+            user=user,
             temperature=0.2,
+            max_output_tokens=3500,
         )
-        content = parse_chat_content(response)
-        if not isinstance(content, dict):
-            raise RuntimeError("OpenAI response did not return a JSON object.")
-        return content
+        if content.startswith("```json"):
+            content = content.removeprefix("```json").strip()
+        if content.endswith("```"):
+            content = content.removesuffix("```").strip()
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Gemini returned invalid JSON response: {exc}; content={content!r}") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Gemini response did not return a JSON object.")
+        return parsed
 
     def guess_metadata(self, filename: str, pdf_metadata: dict[str, str], first_pages: str) -> BookMetadataGuess:
         system = (

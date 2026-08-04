@@ -14,6 +14,7 @@ gradio==6.20.0
 gradio_client==2.5.0
 greenlet==3.5.3
 groovy==0.1.2
+google-genai>=1.0.0
 h11==0.16.0
 hf-gradio==0.4.1
 hf-xet==1.5.1
@@ -28,7 +29,6 @@ markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
 numpy==2.5.1
-openai==2.44.0
 orjson==3.11.9
 packaging==26.2
 pandas==3.0.3
