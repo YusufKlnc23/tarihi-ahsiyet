@@ -312,7 +312,7 @@ class FigureRetriever:
 
     def retrieve_general(self, question: str, limit: int = 5) -> list[RetrievedChunk]:
         terms = question_terms(question, max_terms=10)
-        rows = self.db.search_chunks(search_patterns([], terms), limit=80)
+        rows = self.db.search_chunks(search_patterns([], terms), limit=90)
 
         scored: list[RetrievedChunk] = []
         for row in rows:
@@ -332,3 +332,23 @@ class FigureRetriever:
 def retrieve_chunks_for_figure(db: Database, figure_id: int, question: str, limit: int = 5) -> list[RetrievedChunk]:
     retriever = FigureRetriever(db)
     return retriever.retrieve(figure_id, question, limit=limit)
+
+def judge_retrieval(
+    question: str,
+    retrieved_context: str,
+) -> dict:
+    return judge_answer(
+        question=(
+            "Aşağıdaki chunk'lar kullanıcının asıl sorusunu "
+            f"cevaplamak için yeterli mi?\n\nAsıl soru: {question}"
+        ),
+        context=retrieved_context,
+        reference_answer=(
+            "Seçilen metinlerin soruyu cevaplamak için gerekli "
+            "bilgileri içermesi beklenmektedir."
+        ),
+        answer=(
+            "Retriever tarafından seçilen kaynaklar bunlardır."
+        ),
+    )
+
