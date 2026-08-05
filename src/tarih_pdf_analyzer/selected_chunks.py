@@ -21,7 +21,7 @@ evaluation = judge_answer(
         "23 temmuz 1908."
     ),
     answer=(
-        "2 temmuz 1908"
+        "23 temmuz 1908"
     ),
 )
 
