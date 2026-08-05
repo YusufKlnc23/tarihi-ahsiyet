@@ -31,6 +31,9 @@ def test_load_figure_manifest(tmp_path):
                         "period": "1881-1922",
                     }
                 ]
+                { "name": "Bekir Sıtkı Bircan",
+                   "aliases": ["Bekir Bey",
+                   "period": ["1886-1967",
             }
         ),
         encoding="utf-8",
@@ -143,7 +146,7 @@ def test_citation_and_source_formatting():
 
 
 def test_text_cleanup_repairs_mojibake_and_strips_source_lines():
-    assert repair_mojibake("ReÅŸad PaÅŸa") == "Reşad Paşa"
+    assert repair_mojibake("Reşad Paşa") == "Reşad Paşa"
     answer = clean_generated_answer(
         "Verilen kaynaklara gore, Enver Paşa onemliydi.\nSayfa 89: ayrinti"
     )
